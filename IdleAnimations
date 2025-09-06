@@ -1,0 +1,235 @@
+/*:
+ * @target MZ
+ * @plugindesc Advanced idle animation system with customizable timing and animation options
+ * @author YourName
+ *
+ * @help
+ * This plugin allows characters to display customizable idle animations when stationary.
+ * 
+ * Notetag format:
+ * <Idle: filename, characterIndex, delay, animated>
+ * 
+ * Parameters:
+ * - filename: The character sheet filename (e.g., Actor1)
+ * - characterIndex: The character index (1-8)
+ * - delay: Delay in frames before showing idle animation (0 = immediate)
+ * - animated: true/false - whether to animate the idle state
+ * 
+ * Examples:
+ * <Idle: Actor1, 3, 120, false>  // 2-second delay, static idle frame
+ * <Idle: Actor1, 3, 0, true>     // Immediate, animated walking frames
+ * <Idle: Actor1, 3, 60, false>   // 1-second delay, static idle frame
+ */
+
+(() => {
+    const pluginName = "AdvancedIdleCharacterAnimation";
+
+    // Store original methods
+    const _Game_CharacterBase_initMembers = Game_CharacterBase.prototype.initMembers;
+    const _Game_CharacterBase_update = Game_CharacterBase.prototype.update;
+    const _Game_CharacterBase_moveStraight = Game_CharacterBase.prototype.moveStraight;
+    const _Game_CharacterBase_moveDiagonally = Game_CharacterBase.prototype.moveDiagonally;
+    const _Game_CharacterBase_setPosition = Game_CharacterBase.prototype.setPosition;
+    const _Game_Event_refresh = Game_Event.prototype.refresh;
+    const _Game_CharacterBase_updateAnimation = Game_CharacterBase.prototype.updateAnimation;
+
+    // Initialize idle tracking variables
+    Game_CharacterBase.prototype.initMembers = function() {
+        _Game_CharacterBase_initMembers.call(this);
+        this._isIdle = false;
+        this._idleTimer = 0;
+        this._originalCharacterName = "";
+        this._originalCharacterIndex = 0;
+        this._idleCharacterName = "";
+        this._idleCharacterIndex = 0;
+        this._idleDelay = 0;
+        this._idleAnimated = false;
+        this._hasIdleAnimation = false;
+        this._idleAnimationFrame = 0;
+        this._idleAnimationTimer = 0;
+        this._idleDirectionOffset = 0;
+        this._idleAnimationSequence = [0, 1, 2, 1]; // 0 > 1 > 2 > 1 > 0...
+        this._idleAnimationIndex = 0;
+    };
+
+    // Parse idle animation data from notes
+    Game_CharacterBase.prototype.parseIdleData = function() {
+        let note = "";
+        
+        if (this._eventId) {
+            // For events
+            const eventData = $dataMap.events[this._eventId];
+            if (eventData && eventData.note) {
+                note = eventData.note;
+            }
+        } else if (this === $gamePlayer) {
+            // For player character
+            const actor = $gameParty.leader();
+            if (actor && actor.actor()) {
+                note = actor.actor().note;
+            }
+        }
+        
+        if (note) {
+            this.extractIdleData(note);
+        }
+    };
+
+    Game_CharacterBase.prototype.extractIdleData = function(note) {
+        // Updated regex to capture all parameters
+        const idleMatch = note.match(/<Idle:\s*([^,]+),\s*(\d+),\s*(\d+),\s*(true|false)>/i);
+        if (idleMatch) {
+            this._idleCharacterName = idleMatch[1].trim();
+            this._idleCharacterIndex = parseInt(idleMatch[2]) - 1; // Convert to 0-based index
+            this._idleDelay = parseInt(idleMatch[3]);
+            this._idleAnimated = idleMatch[4].toLowerCase() === 'true';
+            this._hasIdleAnimation = true;
+            this._originalCharacterName = this._characterName;
+            this._originalCharacterIndex = this._characterIndex;
+            
+            // Calculate direction offset for frame selection
+            this._idleDirectionOffset = Math.floor(this._idleCharacterIndex / 4) * 4;
+        } else {
+            this._hasIdleAnimation = false;
+        }
+    };
+
+    // Refresh idle data when event is refreshed
+    Game_Event.prototype.refresh = function() {
+        _Game_Event_refresh.call(this);
+        this.parseIdleData();
+    };
+
+    // Check for movement to reset idle state
+    Game_CharacterBase.prototype.moveStraight = function(d) {
+        this.resetIdleState();
+        _Game_CharacterBase_moveStraight.call(this, d);
+    };
+
+    Game_CharacterBase.prototype.moveDiagonally = function(horz, vert) {
+        this.resetIdleState();
+        _Game_CharacterBase_moveDiagonally.call(this, horz, vert);
+    };
+
+    Game_CharacterBase.prototype.setPosition = function(x, y) {
+        this.resetIdleState();
+        _Game_CharacterBase_setPosition.call(this, x, y);
+    };
+
+    Game_CharacterBase.prototype.resetIdleState = function() {
+        this._idleTimer = 0;
+        this._idleAnimationFrame = 0;
+        this._idleAnimationTimer = 0;
+        this._idleAnimationIndex = 0;
+        
+        if (this._isIdle) {
+            this._isIdle = false;
+            if (this._hasIdleAnimation) {
+                this.setImage(this._originalCharacterName, this._originalCharacterIndex);
+            }
+        }
+    };
+
+    // Override animation update to handle idle animation
+    Game_CharacterBase.prototype.updateAnimation = function() {
+        if (this._isIdle && this._hasIdleAnimation && this._idleAnimated) {
+            // Handle idle animation - cycle through walking frames of the idle character
+            this._idleAnimationTimer++;
+            
+            // Animation speed (adjust as needed)
+            if (this._idleAnimationTimer >= 18) {
+                this._idleAnimationIndex = (this._idleAnimationIndex + 1) % this._idleAnimationSequence.length;
+                this._idleAnimationTimer = 0;
+                
+                // Get the frame from the sequence
+                const sequenceFrame = this._idleAnimationSequence[this._idleAnimationIndex];
+                
+                // Calculate frame index based on current direction and animation frame
+                const frameIndex = this._idleDirectionOffset + sequenceFrame;
+                
+                // Only update the pattern, not the character image
+                this._pattern = sequenceFrame;
+            }
+            return; // Skip default animation update
+        }
+        
+        // Use default animation behavior for non-idle or non-animated idle
+        _Game_CharacterBase_updateAnimation.call(this);
+    };
+
+    // Update idle animation logic
+    Game_CharacterBase.prototype.update = function() {
+        _Game_CharacterBase_update.call(this);
+        
+        if (!this._hasIdleAnimation) return;
+        
+        if (this.isMoving() || this.isJumping()) {
+            this.resetIdleState();
+            return;
+        }
+
+        this._idleTimer++;
+        
+        // Check if it's time to show idle animation
+        if (!this._isIdle && this._idleTimer >= this._idleDelay) {
+            this._isIdle = true;
+            this.setIdleImage();
+        }
+        
+        // Update animation if in idle state
+        if (this._isIdle) {
+            this.updateAnimation();
+        }
+    };
+
+    Game_CharacterBase.prototype.setIdleImage = function() {
+        // Switch to the idle character set
+        this.setImage(this._idleCharacterName, this._idleCharacterIndex);
+        
+        if (this._idleAnimated) {
+            // For animated idle, start with the first frame
+            this._pattern = 0;
+            this._idleAnimationFrame = 0;
+            this._idleAnimationTimer = 0;
+            this._idleAnimationIndex = 0;
+        } else {
+            // For static idle, use the middle frame
+            this._pattern = 1; // Middle frame (stand position)
+        }
+    };
+
+    // Initialize idle data for player character
+    const _Game_Player_refresh = Game_Player.prototype.refresh;
+    Game_Player.prototype.refresh = function() {
+        _Game_Player_refresh.call(this);
+        this.parseIdleData();
+    };
+
+    // Handle party leader changes
+    const _Game_Party_setLeader = Game_Party.prototype.setLeader;
+    Game_Party.prototype.setLeader = function(actorId) {
+        _Game_Party_setLeader.call(this, actorId);
+        if ($gamePlayer) {
+            $gamePlayer.parseIdleData();
+        }
+    };
+
+    // Override pattern to return the correct pattern during idle
+    const _Game_CharacterBase_pattern = Game_CharacterBase.prototype.pattern;
+    Game_CharacterBase.prototype.pattern = function() {
+        if (this._isIdle && this._hasIdleAnimation) {
+            return this._pattern;
+        }
+        return _Game_CharacterBase_pattern.call(this);
+    };
+
+    // Override character index to maintain the idle character during animation
+    const _Game_CharacterBase_characterIndex = Game_CharacterBase.prototype.characterIndex;
+    Game_CharacterBase.prototype.characterIndex = function() {
+        if (this._isIdle && this._hasIdleAnimation) {
+            return this._idleCharacterIndex;
+        }
+        return _Game_CharacterBase_characterIndex.call(this);
+    };
+
+})();
